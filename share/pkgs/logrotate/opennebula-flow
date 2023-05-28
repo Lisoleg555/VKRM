@@ -1,0 +1,9 @@
+/var/log/one/oneflow.log {
+    dateext
+    dateformat -%Y%m%d-%s
+    weekly
+    rotate 52
+    missingok
+    notifempty
+    copytruncate
+}

@@ -1,0 +1,170 @@
+#!/usr/bin/env ruby
+
+# -------------------------------------------------------------------------- #
+# Copyright 2002-2023, OpenNebula Project, OpenNebula Systems                #
+#                                                                            #
+# Licensed under the Apache License, Version 2.0 (the "License"); you may    #
+# not use this file except in compliance with the License. You may obtain    #
+# a copy of the License at                                                   #
+#                                                                            #
+# http://www.apache.org/licenses/LICENSE-2.0                                 #
+#                                                                            #
+# Unless required by applicable law or agreed to in writing, software        #
+# distributed under the License is distributed on an "AS IS" BASIS,          #
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
+# See the License for the specific language governing permissions and        #
+# limitations under the License.                                             #
+#--------------------------------------------------------------------------- #
+ONE_LOCATION = ENV['ONE_LOCATION']
+
+if !ONE_LOCATION
+    RUBY_LIB_LOCATION = '/usr/lib/one/ruby'
+    GEMS_LOCATION     = '/usr/share/one/gems'
+    VMDIR             = '/var/lib/one'
+    CONFIG_FILE       = '/var/lib/one/config'
+else
+    RUBY_LIB_LOCATION = ONE_LOCATION + '/lib/ruby'
+    GEMS_LOCATION     = ONE_LOCATION + '/share/gems'
+    VMDIR             = ONE_LOCATION + '/var'
+    CONFIG_FILE       = ONE_LOCATION + '/var/config'
+end
+
+# %%RUBYGEMS_SETUP_BEGIN%%
+if File.directory?(GEMS_LOCATION)
+    real_gems_path = File.realpath(GEMS_LOCATION)
+    if !defined?(Gem) || Gem.path != [real_gems_path]
+        $LOAD_PATH.reject! {|l| l =~ /vendor_ruby/ }
+
+        # Suppress warnings from Rubygems
+        # https://github.com/OpenNebula/one/issues/5379
+        begin
+            verb = $VERBOSE
+            $VERBOSE = nil
+            require 'rubygems'
+            Gem.use_paths(real_gems_path)
+        ensure
+            $VERBOSE = verb
+        end
+    end
+end
+# %%RUBYGEMS_SETUP_END%%
+
+$LOAD_PATH << RUBY_LIB_LOCATION
+
+require 'pathname'
+require 'rexml/document'
+require 'securerandom'
+
+require_relative '../../tm/lib/datastore'
+require_relative '../../tm/lib/tm_action'
+
+# BACKUP host:remote_dir DISK_ID:..:DISK_ID vm_uuid vm_id ds_id
+
+ds_xml = STDIN.read
+
+dir      = ARGV[0].split(':')
+_disks   = ARGV[1].split(':')
+_vm_uuid = ARGV[2]
+vm_id    = ARGV[3]
+_ds_id   = ARGV[4]
+
+vm_host = dir[0]
+
+rdir   = Pathname.new(dir[1]).cleanpath.to_s
+vm_dir = Pathname.new("#{rdir}/backup/").cleanpath.to_s
+
+begin
+    ds = REXML::Document.new(ds_xml).root
+
+    rsync_user = ds.elements['TEMPLATE/RSYNC_USER'].text
+    rsync_host = ds.elements['TEMPLATE/RSYNC_HOST'].text
+
+    base = ds.elements['BASE_PATH'].text
+
+    if ds.elements['TEMPLATE/RSYNC_ARGS'].nil?
+        args = '-aS'
+    else
+        args = ds.elements['TEMPLATE/RSYNC_ARGS'].text
+    end
+
+    ds = TransferManager::Datastore.new :ds_xml => ds_xml
+rescue StandardError => e
+    STDERR.puts e.message
+    exit(-1)
+end
+
+path = Pathname.new(base).cleanpath.to_s
+
+backup_id   = SecureRandom.hex[0, 6].to_s
+backup_path = "#{path}/#{vm_id}/#{backup_id}/"
+
+#-------------------------------------------------------------------------------
+# Install cleanup handler (triggered by backup_cancel action).
+#   1. [rsync server] delete backup path recursively
+#-------------------------------------------------------------------------------
+Signal.trap(:TERM) do
+    Thread.new do
+        rc = TransferManager::Action.ssh 'purge_dst_path',
+                                         :host     => "#{rsync_user}@#{rsync_host}",
+                                         :cmds     => "rm -rf #{backup_path}",
+                                         :nostdout => true,
+                                         :nostderr => false
+
+        if rc.code != 0
+            STDERR.puts "Error purging rsync dst path: #{rc.stderr}"
+            exit(-1)
+        end
+
+        STDERR.puts "Backup cancelled: #{backup_id}"
+        STDERR.flush
+
+        # Suppress "`read': stream closed in another thread (IOError)".
+        STDOUT.reopen IO::NULL
+        STDERR.reopen IO::NULL
+
+        exit(-1) # fail anyway
+    end.join
+end
+
+#-------------------------------------------------------------------------------
+# Rsync backup files to server:
+#   1. [rsync server] make backup path
+#   2. [host] Compute backup total size & rsync files
+#-------------------------------------------------------------------------------
+rc = TransferManager::Action.ssh 'make_dst_path',
+                                 :host     => "#{rsync_user}@#{rsync_host}",
+                                 :cmds     => "mkdir -p #{backup_path}",
+                                 :nostdout => true,
+                                 :nostderr => false
+
+if rc.code != 0
+    STDERR.puts "Error making rsync dst path: #{rc.stderr}"
+    exit(-1)
+end
+
+cmd = "rsync #{args} #{vm_dir}/ #{rsync_user}@#{rsync_host}:#{backup_path}"
+
+script = <<~EOS
+    set -ex -o pipefail
+
+    BKSIZE=`du -sm #{vm_dir}`
+
+    #{ds.cmd_confinement(cmd, rdir, ['SSH_AUTH_SOCK'])} > /dev/null
+
+    echo $BKSIZE
+EOS
+
+rc = TransferManager::Action.ssh 'backup',
+                                 :host     => vm_host,
+                                 :cmds     => script,
+                                 :forward  => true,
+                                 :nostdout => false,
+                                 :nostderr => false
+
+if rc.code != 0 || rc.stdout.empty?
+    STDERR.puts "Error copying backup: #{rc.stderr}"
+    exit(-1)
+end
+
+STDOUT.puts "#{backup_id} #{rc.stdout.lines.last.split[0]}"
+exit(0)

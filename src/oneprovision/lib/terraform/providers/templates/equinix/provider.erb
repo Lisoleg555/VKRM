@@ -1,0 +1,13 @@
+terraform {
+    required_providers {
+        packet = {
+            source = "packethost/packet"
+        }
+    }
+    required_version = ">= 0.13"
+}
+
+provider "packet" {
+    auth_token = "<%= conn['TOKEN'] %>"
+}
+

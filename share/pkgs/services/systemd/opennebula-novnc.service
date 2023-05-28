@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenNebula noVNC Server
+After=syslog.target network.target
+
+[Service]
+Type=forking
+Group=oneadmin
+User=oneadmin
+ExecStartPre=-/usr/sbin/logrotate -f /etc/logrotate.d/opennebula-novnc -s /var/lib/one/.logrotate.status
+ExecStartPre=-sh 'gzip -9 /var/log/one/novnc.log-* &'
+ExecStart=/usr/bin/novnc-server start
+PIDFile=/var/lock/one/.novnc.lock
+StartLimitInterval=60
+StartLimitBurst=3
+Restart=on-failure
+RestartSec=5
+SyslogIdentifier=opennebula-novnc
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,32 @@
+---
+# Ceph basics
+ceph_origin: repository
+ceph_repository: uca
+ceph_rhcs_version: 7
+ceph_stable_release: quincy
+ceph_stable_release_num: 17
+dashboard_enabled: false
+configure_firewall: false
+ceph_stable_openstack_release_uca: yoga
+
+# ceph overrides (applying in ceph.conf)
+ceph_conf_overrides:
+  global:
+    bluefs_buffered_io: false
+
+# OSD
+osd_objectstore: bluestore
+osd_scenario: collocated
+is_hci: true
+
+# OpenNebula specifics
+ceph_opennebula_mon_pools:
+    - name: one
+      pg_num: 128
+      type: replicated
+      set:
+          - name: size
+            value: 3
+
+# ceph default vars
+<%= vars %>
